@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: megajobfair-backend
+  datasource:
+    url: jdbc:postgresql://localhost:${DB_PORT:5432}/megajobfair
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+
+server:
+  port: 8080
+
+app:
+  jwt:
+    # at least 32 characters; set it as an environment variable, never commit it
+    secret: ${JWT_SECRET}
+    expiration-minutes: ${JWT_EXPIRATION_MINUTES:720}
+  notify:
+    # false = credentials are printed in the console instead of emailed (until Karthik's service is ready)
+    enabled: ${NOTIFY_ENABLED:false}
+    base-url: ${NOTIFY_BASE_URL:http://localhost:8000}
+  frontend:
+    login-url: ${FRONTEND_LOGIN_URL:http://localhost:5173/login}
+    allowed-origins: ${FRONTEND_ORIGINS:http://localhost:5173}
+  admin:
+    # first admin account, created on startup only if no admin exists yet
+    email: ${ADMIN_EMAIL:}
+    password: ${ADMIN_PASSWORD:}
