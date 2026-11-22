@@ -2,3 +2,4 @@ gspread
 pandas
 rapidfuzz
 python-dotenv
+qrcode[pil]
