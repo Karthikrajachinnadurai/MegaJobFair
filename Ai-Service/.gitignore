@@ -1,0 +1,10 @@
+# secrets
+credentials.json
+.env
+
+# environment
+.venv/
+__pycache__/
+
+# student data outputs
+*.csv
