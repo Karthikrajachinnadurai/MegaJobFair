@@ -24,6 +24,8 @@ app:
     # false = credentials are printed in the console instead of emailed (until Karthik's service is ready)
     enabled: ${NOTIFY_ENABLED:false}
     base-url: ${NOTIFY_BASE_URL:http://localhost:8000}
+    # must be the same value as SERVICE_API_KEY in Karthik's Ai-Service/.env
+    api-key: ${NOTIFY_API_KEY:}
   frontend:
     login-url: ${FRONTEND_LOGIN_URL:http://localhost:5173/login}
     allowed-origins: ${FRONTEND_ORIGINS:http://localhost:5173}
