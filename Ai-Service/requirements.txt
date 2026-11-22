@@ -1,2 +1,4 @@
 gspread
 pandas
+rapidfuzz
+python-dotenv
