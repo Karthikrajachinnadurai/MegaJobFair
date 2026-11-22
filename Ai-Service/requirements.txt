@@ -3,3 +3,5 @@ pandas
 rapidfuzz
 python-dotenv
 qrcode[pil]
+fastapi
+uvicorn
