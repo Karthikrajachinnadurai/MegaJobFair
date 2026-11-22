@@ -48,7 +48,31 @@ def send_with_retry(server, msg: EmailMessage):
                 raise
             time.sleep(2 ** attempt)          # wait 2s, then 4s
 
+def build_credentials_email(name: str, to: str, password: str, login_url: str) -> EmailMessage:
+    msg = EmailMessage()
+    msg["Subject"] = "Your Mega Job Fair Portal Login"
+    msg["From"] = SMTP_USER
+    msg["To"] = to
+    msg.set_content(
+        f"Dear {name},\n\n"
+        "Welcome to the Mega Job Fair! Your attendance has been marked.\n\n"
+        f"Login here: {login_url}\n"
+        f"Username: {to if not TEST_EMAIL else '(your email)'}\n"
+        f"Password: {password}\n\n"
+        "Log in to see the companies and register for interviews.\n"
+        "Do not share this password with anyone.\n\n"
+        "Regards,\nMega Job Fair Team"
+    )
+    return msg
 
+
+def send_one(msg: EmailMessage):
+    """Open a connection, send ONE email (with retries), close."""
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        send_with_retry(server, msg)
+        
 def send_all():
     if not SMTP_USER or not SMTP_PASSWORD:
         raise SystemExit("SMTP_USER / SMTP_PASSWORD missing in .env")
