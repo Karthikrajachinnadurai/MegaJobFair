@@ -1,24 +1,12 @@
 import re
 import gspread
 import pandas as pd
-
+from config import SHEET_ID, COLUMN_MAP
 pd.set_option("display.width", 200)
 pd.set_option("display.max_columns", None)
 
-SHEET_ID = "1c2CuK1RIpboGpfUdqvUIR609YuUtC-FyvBiQjKUywpU"
 
-# Sheet header -> our column name. Only this changes for the real sheet.
-COLUMN_MAP = {
-    "Timestamp":            "submitted_at",
-    "Name of the college:": "college_name",
-    "Name of the student:": "full_name",
-    "Education:":           "education",
-    "Subject:":             "subject",
-    "Year of Passing:":     "year_of_passing",
-    "Mobile No:":           "mobile",
-    "Email :":              "email",
-    "District:":            "district",
-}
+
 
 # Known spellings -> one standard value
 EDUCATION_MAP = {"BE": "B.E", "BTECH": "B.Tech", "BSC": "B.Sc", "ME": "M.E", "MBA": "MBA"}
@@ -33,9 +21,15 @@ def read_sheet() -> pd.DataFrame:
     gc = gspread.service_account(filename="credentials.json")
     ws = gc.open_by_key(SHEET_ID).sheet1
     df = pd.DataFrame(ws.get_all_records())
+
+    missing = set(COLUMN_MAP) - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Sheet is missing these columns: {missing}\n"
+            f"Sheet has: {list(df.columns)}\n"
+            f"Update COLUMN_MAP in config.py"
+        )
     return df.rename(columns=COLUMN_MAP)[list(COLUMN_MAP.values())]
-
-
 # ---------- 2. CLEAN EACH FIELD ----------
 def clean_text(v) -> str:
     """Strip spaces at the ends and collapse double spaces inside."""
