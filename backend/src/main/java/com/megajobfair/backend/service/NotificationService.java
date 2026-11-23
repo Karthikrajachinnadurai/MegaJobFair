@@ -21,6 +21,7 @@ public class NotificationService {
     private final String apiKey;
     private final RestClient restClient;
 
+
     public NotificationService(@Value("${app.notify.enabled}") boolean enabled,
                                @Value("${app.notify.base-url}") String baseUrl,
                                @Value("${app.notify.api-key:}") String apiKey,
