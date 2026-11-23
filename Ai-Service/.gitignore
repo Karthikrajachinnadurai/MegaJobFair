@@ -9,4 +9,5 @@ __pycache__/
 # student data outputs
 *.csv
 
-qr_codes/.
+
+qr_codes/
