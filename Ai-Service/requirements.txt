@@ -5,3 +5,5 @@ python-dotenv
 qrcode[pil]
 fastapi
 uvicorn
+sqlalchemy
+psycopg[binary]

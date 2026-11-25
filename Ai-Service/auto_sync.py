@@ -3,84 +3,166 @@ import time
 from datetime import datetime
 
 import pandas as pd
+from dotenv import load_dotenv
+from sqlalchemy import text
 
-from form_import import read_sheet, clean, remove_duplicates, find_problems
+from db import engine
+from form_import import read_sheet, clean, find_problems
 from qr_service import new_token, make_qr_image, QR_FOLDER
 from mailer import build_qr_email, send_one, TEST_EMAIL
 
-STATE_FILE = "students_state.csv"   # becomes database tables later
-POLL_SECONDS = 60                   # check the sheet every minute
-MAX_ATTEMPTS = 3                    # stop retrying an email after 3 failures
-COLUMNS = ["email", "full_name", "qr_token", "email_status",
-           "attempts", "email_error", "imported_at", "sent_at"]
+load_dotenv()
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))   # how often to check the sheet
+MAX_ATTEMPTS = 3                                      # stop retrying an email after 3 failures
+TIMEZONE = "Asia/Kolkata"                             # Google Form timestamps are Indian time
+
+_last_counts = None
 
 
 def log(msg: str):
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
-def load_state() -> pd.DataFrame:
-    if os.path.exists(STATE_FILE):
-        return pd.read_csv(STATE_FILE, dtype=str).fillna("")
-    return pd.DataFrame(columns=COLUMNS)
+def none_if_missing(v):
+    """pandas uses NaN/NaT for 'missing'; the database wants None (NULL)."""
+    return None if pd.isna(v) else v
 
 
-def save_state(state: pd.DataFrame):
-    state.to_csv(STATE_FILE, index=False)
+# ---------- STEP 1: sheet -> form_responses (every row, good or bad) ----------
+SAVE_RESPONSE = text("""
+    INSERT INTO form_responses
+        (submitted_at, email_raw, email, full_name, college_name, education, subject,
+         year_of_passing, mobile, district, status, problems)
+    VALUES
+        (:submitted_at, :email_raw, :email, :full_name, :college_name, :education, :subject,
+         :year_of_passing, :mobile, :district, :status, :problems)
+    ON CONFLICT (submitted_at, email_raw) DO NOTHING
+""")
+
+MARK_OLDER_DUPLICATES = text("""
+    UPDATE form_responses old
+    SET status = 'DUPLICATE'
+    WHERE old.status = 'VALID'
+      AND EXISTS (SELECT 1 FROM form_responses newer
+                  WHERE newer.email = old.email
+                    AND newer.status = 'VALID'
+                    AND newer.submitted_at > old.submitted_at)
+""")
 
 
-def import_new_students(state: pd.DataFrame) -> pd.DataFrame:
-    """Read the sheet; add only VALID students we have never seen before."""
-    df = remove_duplicates(clean(read_sheet()))
+def save_sheet_rows(conn) -> int:
+    raw = read_sheet()
+    df = clean(raw)
+    df["email_raw"] = raw["email"].astype(str)              # exactly what was typed
     df["problems"] = df.apply(find_problems, axis=1)
-    valid = df[df["problems"] == ""]
+    df["status"] = df["problems"].map(lambda p: "NEEDS_REVIEW" if p else "VALID")
+    df["submitted_at"] = df["submitted_at"].dt.tz_localize(TIMEZONE)
 
-    new = valid[~valid["email"].isin(set(state["email"]))]
-    os.makedirs(QR_FOLDER, exist_ok=True)
-
-    for _, row in new.iterrows():
-        token = new_token()
-        make_qr_image(token, os.path.join(QR_FOLDER, f"{token}.png"))
-        record = {"email": row["email"], "full_name": row["full_name"], "qr_token": token,
-                  "email_status": "PENDING", "attempts": "0", "email_error": "",
-                  "imported_at": datetime.now().isoformat(timespec="seconds"), "sent_at": ""}
-        state = pd.concat([state, pd.DataFrame([record])], ignore_index=True)
-        save_state(state)                       # save after each new student
-        log(f"new student: {row['full_name']} <{row['email']}>")
-
-    review = len(df) - len(valid)
-    if review:
-        log(f"{review} row(s) need review (not imported)")
-    return state
+    rows = [{k: none_if_missing(v) for k, v in r.items()}
+            for r in df.to_dict("records")]
+    inserted = 0
+    for r in rows:
+        if r["submitted_at"] is None:                       # no timestamp = can't identify the row
+            continue
+        inserted += conn.execute(SAVE_RESPONSE, r).rowcount  # 1 = new row, 0 = already saved
+    conn.execute(MARK_OLDER_DUPLICATES)
+    return inserted
 
 
-def send_pending_emails(state: pd.DataFrame) -> pd.DataFrame:
-    """Email every student whose QR hasn't been sent yet (and hasn't failed too often)."""
-    todo = state[(state["email_status"] != "SENT")
-                 & (state["attempts"].astype(int) < MAX_ATTEMPTS)]
+# ---------- STEP 2: VALID responses -> Arun's students table ----------
+PENDING_IMPORTS = text("""
+    SELECT id, email, full_name, subject, mobile
+    FROM form_responses
+    WHERE status = 'VALID' AND student_id IS NULL
+    ORDER BY submitted_at
+""")
 
-    for i, row in todo.iterrows():
-        qr_path = os.path.join(QR_FOLDER, f"{row['qr_token']}.png")
-        to = TEST_EMAIL or row["email"]
-        state.at[i, "attempts"] = str(int(row["attempts"]) + 1)
+UPSERT_STUDENT = text("""
+    INSERT INTO students (name, email, department, phone, qr_token)
+    VALUES (:name, :email, :department, :phone, :qr_token)
+    ON CONFLICT (email) DO UPDATE
+        SET name = EXCLUDED.name, department = EXCLUDED.department, phone = EXCLUDED.phone
+    RETURNING id, (xmax = 0) AS created
+""")
+
+LINK_RESPONSE = text("UPDATE form_responses SET student_id = :sid WHERE id = :rid")
+
+CREATE_QR_JOB = text("""
+    INSERT INTO email_jobs (student_id, kind) VALUES (:sid, 'QR_PASS')
+    ON CONFLICT (student_id, kind) DO NOTHING
+""")
+
+
+def import_students(conn) -> int:
+    created = 0
+    for r in conn.execute(PENDING_IMPORTS).mappings().all():
+        sid, is_new = conn.execute(UPSERT_STUDENT, {
+            "name": r["full_name"], "email": r["email"], "department": r["subject"],
+            "phone": r["mobile"], "qr_token": new_token(),   # only used if the student is new
+        }).one()
+        conn.execute(LINK_RESPONSE, {"sid": sid, "rid": r["id"]})
+        conn.execute(CREATE_QR_JOB, {"sid": sid})
+        if is_new:
+            created += 1
+            log(f"new student: {r['full_name']} <{r['email']}>")
+    return created
+
+
+# ---------- STEP 3: send QR emails that are not SENT yet ----------
+PENDING_EMAILS = text("""
+    SELECT j.id, s.name, s.email, s.qr_token, j.attempts
+    FROM email_jobs j JOIN students s ON s.id = j.student_id
+    WHERE j.kind = 'QR_PASS' AND j.status <> 'SENT' AND j.attempts < :max
+    ORDER BY j.id
+""")
+
+MARK_SENT = text("""
+    UPDATE email_jobs SET status = 'SENT', attempts = attempts + 1,
+                          last_error = NULL, sent_at = now()
+    WHERE id = :id
+""")
+
+MARK_FAILED = text("""
+    UPDATE email_jobs SET status = 'FAILED', attempts = attempts + 1, last_error = :err
+    WHERE id = :id
+""")
+
+
+def send_pending_emails():
+    with engine.connect() as conn:
+        jobs = conn.execute(PENDING_EMAILS, {"max": MAX_ATTEMPTS}).mappings().all()
+
+    for job in jobs:
+        qr_path = os.path.join(QR_FOLDER, f"{job['qr_token']}.png")
+        if not os.path.exists(qr_path):                     # draw the QR from the saved token
+            os.makedirs(QR_FOLDER, exist_ok=True)
+            make_qr_image(job["qr_token"], qr_path)
+        to = TEST_EMAIL or job["email"]
         try:
-            send_one(build_qr_email(row["full_name"], to, qr_path))
-            state.at[i, "email_status"] = "SENT"
-            state.at[i, "email_error"] = ""
-            state.at[i, "sent_at"] = datetime.now().isoformat(timespec="seconds")
-            log(f"QR sent: {row['full_name']} -> {to}")
+            send_one(build_qr_email(job["name"], to, qr_path))
+            with engine.begin() as conn:                     # record each result immediately
+                conn.execute(MARK_SENT, {"id": job["id"]})
+            log(f"QR sent: {job['name']} -> {to}")
         except Exception as e:
-            state.at[i, "email_status"] = "FAILED"
-            state.at[i, "email_error"] = str(e)[:200]
-            log(f"QR FAILED: {row['full_name']}: {e}")
-        save_state(state)                       # save after every email
-    return state
+            with engine.begin() as conn:
+                conn.execute(MARK_FAILED, {"id": job["id"], "err": str(e)[:500]})
+            log(f"QR FAILED: {job['name']}: {e}")
 
 
+# ---------- one full sync ----------
 def sync_once():
-    state = load_state()
-    state = import_new_students(state)
-    send_pending_emails(state)
+    global _last_counts
+    with engine.begin() as conn:                 # steps 1 + 2: one transaction, all or nothing
+        new_rows = save_sheet_rows(conn)
+        import_students(conn)
+        review = conn.execute(text(
+            "SELECT count(*) FROM form_responses WHERE status = 'NEEDS_REVIEW'")).scalar()
+
+    if new_rows or review != _last_counts:
+        log(f"{new_rows} new form row(s) saved | {review} need review")
+        _last_counts = review
+
+    send_pending_emails()                        # step 3: outside the transaction (slow network)
 
 
 def main():
@@ -89,7 +171,7 @@ def main():
     while True:
         try:
             sync_once()
-        except Exception as e:                  # one bad run must not stop the loop
+        except Exception as e:                   # one bad run must not stop the loop
             log(f"sync error: {e}")
         time.sleep(POLL_SECONDS)
 
