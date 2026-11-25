@@ -91,7 +91,16 @@ CREATE_QR_JOB = text("""
     INSERT INTO email_jobs (student_id, kind) VALUES (:sid, 'QR_PASS')
     ON CONFLICT (student_id, kind) DO NOTHING
 """)
-
+# Students added by the admin in the frontend (Java) never pass through the form,
+# so they have no QR job yet. Give every student without one a QR_PASS job.
+QR_JOBS_FOR_ADMIN_ADDED = text("""
+    INSERT INTO email_jobs (student_id, kind)
+    SELECT s.id, 'QR_PASS'
+    FROM students s
+    WHERE NOT EXISTS (SELECT 1 FROM email_jobs j
+                      WHERE j.student_id = s.id AND j.kind = 'QR_PASS')
+    ON CONFLICT (student_id, kind) DO NOTHING
+""")
 
 def import_students(conn) -> int:
     created = 0
@@ -102,10 +111,14 @@ def import_students(conn) -> int:
         }).one()
         conn.execute(LINK_RESPONSE, {"sid": sid, "rid": r["id"]})
         conn.execute(CREATE_QR_JOB, {"sid": sid})
+        added=conn.execute(QR_JOBS_FOR_ADMIN_ADDED).rowcount
+        if added:
+            log(f"{added} admin-added student(s) queued for a QR email")
         if is_new:
             created += 1
             log(f"new student: {r['full_name']} <{r['email']}>")
     return created
+
 
 
 # ---------- STEP 3: send QR emails that are not SENT yet ----------
