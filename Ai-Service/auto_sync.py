@@ -111,12 +111,15 @@ def import_students(conn) -> int:
         }).one()
         conn.execute(LINK_RESPONSE, {"sid": sid, "rid": r["id"]})
         conn.execute(CREATE_QR_JOB, {"sid": sid})
-        added=conn.execute(QR_JOBS_FOR_ADMIN_ADDED).rowcount
-        if added:
-            log(f"{added} admin-added student(s) queued for a QR email")
         if is_new:
             created += 1
             log(f"new student: {r['full_name']} <{r['email']}>")
+
+    # Runs on EVERY sync, not only when a new form row arrives:
+    # students added by the admin in the frontend get their QR email too.
+    added = conn.execute(QR_JOBS_FOR_ADMIN_ADDED).rowcount
+    if added:
+        log(f"{added} admin-added student(s) queued for a QR email")
     return created
 
 
